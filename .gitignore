@@ -1,0 +1,40 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and editor files
+build/
+dist/
+.vscode/
+.idea/
+.DS_Store
+
+# Local records and generated files
+uploads/
+backups/
+*.log
+coverage.xml
+.coverage
+htmlcov/
+
+# React / Node
+node_modules/
+*.tsbuildinfo
+.vite/
+
+# Local PostgreSQL data
+.postgres/
+
+# Private lodge database archives and restore history
+backend/private-backups/

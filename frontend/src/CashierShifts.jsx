@@ -1,0 +1,58 @@
+import ConfirmationPrompt from './ConfirmationPrompt';
+import {useEffect,useRef,useState} from 'react';
+import {createPortal} from 'react-dom';
+const money=n=>`TZS ${Number(n).toLocaleString()}`;
+const time=t=>t?new Date(t).toLocaleString('en-GB',{timeZone:'Africa/Dar_es_Salaam'}):'Open';
+const today=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Dar_es_Salaam',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+function ShiftSummary({shift:s}) {
+  return <><p><strong>{s.staff} · {s.drawer}</strong> · {s.closedAt?'Closed':'Open'}</p><p>Opened: {time(s.openedAt)} · Closed: {time(s.closedAt)} (Tanzania)</p>
+    <div className="shift-summary"><p>Opening cash<strong>{money(s.openingCash)}</strong></p><p>Cash received<strong>{money(s.cashCollected)}</strong></p><p>Cash expenses<strong>{money(s.cashExpenses)}</strong></p><p>Expected cash<strong>{money(s.expectedCash)}</strong></p><p>Mobile money received<strong>{money(s.mobileCollected)}</strong></p><p>Mobile expenses<strong>{money(s.mobileExpenses)}</strong></p><p>Net mobile movement<strong>{money(s.mobileMovement)}</strong></p></div>
+    {s.closedAt&&<><p>Actual cash counted: <strong>{money(s.countedCash)}</strong></p><p className="shift-variance">{s.variance===0?'Cash balanced':s.variance<0?`Shortage: ${money(-s.variance)}`:`Surplus: ${money(s.variance)}`}</p><p>Closing reason: {s.closeNotes||'Balanced, no adjustment reason needed.'}</p><p>Closed by: {s.closedBy}</p></>}
+  </>;
+}
+function ClosingReport({shift,onClose}) {
+  const ref=useRef(null);
+  useEffect(()=>{ref.current?.showModal();return()=>ref.current?.close();},[]);
+  return createPortal(<dialog className="receipt-dialog" ref={ref} aria-label="Shift closing report" onCancel={e=>{e.preventDefault();onClose();}}><div className="receipt-toolbar"><button onClick={()=>window.print()}>Print / Save as PDF</button><button onClick={onClose}>Close report</button></div><article className="guest-receipt"><h1>Kemmon Lodge</h1><h2>Cashier shift closing report</h2><p>Shift ID: {shift.id}</p><ShiftSummary shift={shift}/><p>{shift.entryCount} transactions. Cash and mobile money are shown separately. Room charges are included only when paid.</p></article></dialog>,document.body);
+}
+export default function CashierShifts({api,can,user}) {
+  const reviewAll=can('shifts.review');
+  const [current,setCurrent]=useState(null),[data,setData]=useState(null),[detail,setDetail]=useState(null),[error,setError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[review,setReview]=useState(null),[report,setReport]=useState(null);
+  const [opening,setOpening]=useState({drawer:'Reception',openingCash:''}),[closing,setClosing]=useState({countedCash:'',notes:''});
+  const [filters,setFilters]=useState({start_date:today(),end_date:today(),scope:reviewAll?'all':'mine',state:'all'}),[loaded,setLoaded]=useState(null);
+  const pendingKey=`kemmon_shift_pending_${user.id}`;
+  useEffect(()=>{try{const value=JSON.parse(localStorage.getItem(pendingKey));if(value?.body?.requestId&&['open','close'].includes(value.type))setReview(value);}catch{}},[pendingKey]);
+  async function load(range=filters,page=1){const [active,list]=await Promise.all([api('/shifts/current'),api(`/shifts?${new URLSearchParams({...range,page:String(page)})}`)]);setCurrent(active);setData(list);setLoaded(range);}
+  useEffect(()=>{load().catch(e=>setError(e.message));},[]);
+  async function inspect(id,page=1){setBusy(true);setError('');try{const d=await api(`/shifts/${id}?page=${page}`);setDetail(d);setClosing({countedCash:'',notes:''});}catch(e){setError(e.message);}finally{setBusy(false);}}
+  function prepare(value){setReview(value);setError('');setMessage('');}
+  async function save(){setBusy(true);setError('');setMessage('');try{try{localStorage.setItem(pendingKey,JSON.stringify(review));}catch{}const result=await api(review.type==='open'?'/shifts':`/shifts/${review.shiftId}/close`,{method:'POST',body:JSON.stringify(review.body)});try{localStorage.removeItem(pendingKey);}catch{}setReview(null);setMessage(review.type==='open'?'Shift opened. Payments will now link to this shift.':'Shift closed. Counted cash and closing totals are saved.');if(result.closedAt)setReport(result);setDetail(null);await load(loaded||filters);}catch(e){setError(e.message);}finally{setBusy(false);}}
+  const shift=detail?.shift;
+  const canClose=shift&&!shift.closedAt&&can('shifts.manage')&&(shift.staffId===user.id||user.isOwner);
+  const variance=shift&&closing.countedCash!==''?Number(closing.countedCash)-shift.expectedCash:null;
+  function discard(){const id=review?.type==='close'?review.shiftId:null;try{localStorage.removeItem(pendingKey);}catch{}setReview(null);if(id)inspect(id);}
+  return <section><h2>Cashier shifts</h2><p>One open shift per staff account and per named cash drawer. Close the drawer’s previous shift before staff handover. Count the actual cash in that drawer when opening and closing.</p>
+    <p>Expected cash = opening cash + room/bar cash payments − current-day cash expenses recorded by that cashier during the shift. Mobile money stays separate. Historical expenses and payments recorded before shifts were introduced are outside this shift ledger. Daily cash summary remains a separate lodge-wide report.</p>
+    {error&&<p role="alert">{error}</p>}{message&&<p role="status">{message}</p>}
+    <button disabled={busy||!!review} onClick={()=>load(loaded||filters).catch(e=>setError(e.message))}>Refresh shifts</button>
+    <h3>Your current shift</h3>{current?<><ShiftSummary shift={current}/><button disabled={busy||!!review} onClick={()=>inspect(current.id)}>Inspect / close your shift</button></>:<p>You have no open shift. Open one before recording payments or today’s paid expenses.</p>}
+    {can('shifts.manage')&&!current&&<form className="shift-form" onSubmit={e=>{e.preventDefault();prepare({type:'open',body:{requestId:crypto.randomUUID(),drawer:opening.drawer.trim(),openingCash:opening.openingCash},summary:`Open ${opening.drawer} with ${money(opening.openingCash)} counted cash for ${user.username}.`});}}><label>Cash drawer<input required maxLength={80} value={opening.drawer} disabled={busy||!!review} onChange={e=>setOpening({...opening,drawer:e.target.value})}/></label><label>Starting cash counted (TZS)<input required type="number" min="0" max="999999999999" step="1" value={opening.openingCash} disabled={busy||!!review} onChange={e=>setOpening({...opening,openingCash:e.target.value})}/></label><button disabled={busy||!!review}>Review opening shift</button></form>}
+    {detail&&<section><h3>Shift details</h3><ShiftSummary shift={shift}/><p>{shift.entryCount} linked transactions. Totals include every page.</p>
+      {shift.closedAt&&<button onClick={()=>setReport(shift)}>Print closing report</button>}
+      {canClose&&<form className="shift-form" onSubmit={e=>{e.preventDefault();prepare({type:'close',shiftId:shift.id,body:{requestId:crypto.randomUUID(),countedCash:closing.countedCash,expectedEntryCount:shift.entryCount,notes:closing.notes.trim()},summary:`Close ${shift.staff} · ${shift.drawer}. Expected ${money(shift.expectedCash)}; counted ${money(closing.countedCash)}; ${variance===0?'balanced':variance<0?`shortage ${money(-variance)}`:`surplus ${money(variance)}`}.`});}}>
+        <label>Actual cash counted (TZS)<input type="number" min="0" max="999999999999" step="1" required disabled={busy||!!review} value={closing.countedCash} onChange={e=>setClosing({...closing,countedCash:e.target.value})}/></label>
+        <label>Reason {variance!==0||shift.staffId!==user.id?'(required)':'(optional)'}<textarea maxLength={1000} required={variance!==0||shift.staffId!==user.id} disabled={busy||!!review} value={closing.notes} onChange={e=>setClosing({...closing,notes:e.target.value})}/></label><button disabled={busy||!!review}>Review closing shift</button>
+      </form>}
+      {shift.expectedCash<0&&!shift.closedAt&&<p className="shift-warning">Recorded cash expenses exceed starting cash and collections. Review the drawer’s entries before closing.</p>}
+      <div className="table-scroll"><table><thead><tr><th>Recorded (Tanzania)</th><th>Source</th><th>Type</th><th>Method</th><th>Amount</th><th>Record ID</th></tr></thead><tbody>{detail.entries.map(e=><tr key={e.source+e.id}><td>{time(e.recordedAt)}</td><td>{e.source==='stay'?'Guest payment':e.source==='bar'?'Bar sale':'Expense'}</td><td>{e.kind}</td><td>{e.method==='cash'?'Cash':'Mobile money'}</td><td>{money(e.amount)}</td><td>{e.id}</td></tr>)}</tbody></table></div>
+      <button disabled={busy||!!review||detail.page===1} onClick={()=>inspect(shift.id,detail.page-1)}>Previous entries</button><span> Page {detail.page} </span><button disabled={busy||!!review||!detail.hasMore} onClick={()=>inspect(shift.id,detail.page+1)}>Next entries</button>
+    </section>}
+    {review&&<ConfirmationPrompt busy={busy} onDismiss={discard} feedback={error}><h3>Confirm shift action</h3><p>{review.summary}</p>{review.body.notes&&<p>Reason: {review.body.notes}</p>}<p>If a save fails, retry this same action before starting another.</p><button disabled={busy} onClick={save}>{busy?'Saving…':'Confirm and save'}</button><button disabled={busy} onClick={discard}>Go back / refresh details</button></ConfirmationPrompt>}
+    <h3>Shift history</h3><p>Filter by the date the shift opened, in Tanzania time. A shift can continue past midnight.</p>
+    <form className="shift-form" onSubmit={e=>{e.preventDefault();setBusy(true);load().catch(e=>setError(e.message)).finally(()=>setBusy(false));}}><label>From<input required type="date" disabled={busy||!!review} value={filters.start_date} onChange={e=>setFilters({...filters,start_date:e.target.value})}/></label><label>To<input required type="date" min={filters.start_date} disabled={busy||!!review} value={filters.end_date} onChange={e=>setFilters({...filters,end_date:e.target.value})}/></label>
+      {reviewAll&&<label>Staff<select disabled={busy||!!review} value={filters.scope} onChange={e=>setFilters({...filters,scope:e.target.value})}><option value="mine">My shifts</option><option value="all">All staff</option></select></label>}
+      <label>Status<select disabled={busy||!!review} value={filters.state} onChange={e=>setFilters({...filters,state:e.target.value})}><option value="all">All</option><option value="open">Open</option><option value="closed">Closed</option></select></label><button disabled={busy||!!review}>View shifts</button></form>
+    {data&&<><div className="table-scroll"><table><thead><tr><th>Staff / drawer</th><th>Opened</th><th>Closed</th><th>Expected cash</th><th>Counted cash</th><th>Shortage / surplus</th><th>Details</th></tr></thead><tbody>{data.shifts.map(s=><tr key={s.id}><td>{s.staff} · {s.drawer}</td><td>{time(s.openedAt)}</td><td>{time(s.closedAt)}</td><td>{money(s.expectedCash)}</td><td>{s.countedCash===null?'—':money(s.countedCash)}</td><td>{s.variance===null?'—':s.variance===0?'Balanced':`${s.variance<0?'Shortage':'Surplus'} ${money(Math.abs(s.variance))}`}</td><td><button disabled={busy||!!review} onClick={()=>inspect(s.id)}>View</button></td></tr>)}</tbody></table></div>
+      {!data.shifts.length&&<p>No shifts match these dates and filters.</p>}<button disabled={busy||!!review||data.page===1} onClick={()=>load(loaded,data.page-1).catch(e=>setError(e.message))}>Previous shifts</button><span> Page {data.page} </span><button disabled={busy||!!review||!data.hasMore} onClick={()=>load(loaded,data.page+1).catch(e=>setError(e.message))}>Next shifts</button></>}
+    {report&&<ClosingReport shift={report} onClose={()=>setReport(null)}/>}</section>;
+}
